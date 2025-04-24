@@ -1,0 +1,124 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: './frontend/package-lock.json'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Lint code
+        run: npm run lint
+        continue-on-error: true
+      
+      - name: Run tests
+        run: npm test
+      
+      - name: Build frontend
+        run: npm run build
+      
+      - name: Upload frontend build
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist
+  
+  test-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+      
+      - name: Test with Maven
+        run: mvn test
+      
+      - name: Code coverage report
+        run: mvn jacoco:report
+      
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+        
+      - name: Upload backend build
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-build
+          path: backend/target/*.jar
+      
+      - name: Upload test coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-coverage
+          path: backend/target/site/jacoco
+  
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test-frontend, test-backend]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist
+      
+      - name: Download backend build
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-build
+          path: backend/target
+      
+      - name: Deploy to EC2
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          # SSH 키 설정
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # 호스트 키 검증 건너뛰기
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+          
+          # 배포 스크립트 전송
+          scp -r ./scripts/deploy.sh $EC2_USER@$EC2_HOST:~/deploy.sh
+          scp -r ./docker-compose.yml $EC2_USER@$EC2_HOST:~/docker-compose.yml
+          scp -r ./frontend/dist/* $EC2_USER@$EC2_HOST:~/frontend/dist/
+          scp -r ./backend/target/*.jar $EC2_USER@$EC2_HOST:~/backend/app.jar
+          scp -r ./nginx/* $EC2_USER@$EC2_HOST:~/nginx/
+          
+          # 배포 스크립트 실행
+          ssh $EC2_USER@$EC2_HOST "chmod +x ~/deploy.sh && ~/deploy.sh" 
